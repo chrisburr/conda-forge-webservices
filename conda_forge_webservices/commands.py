@@ -9,6 +9,8 @@ import tempfile
 import textwrap
 from ruamel.yaml import YAML
 import requests
+from conda.exceptions import InvalidVersionSpec
+from conda.models.version import VersionOrder
 from requests.exceptions import RequestException
 import logging
 from contextlib import contextmanager
@@ -805,6 +807,16 @@ def issue_comment(
                             pr.number,
                             input_ver,
                         )
+                    except InvalidInputVersion:
+                        # in a code span, which a backtick would close
+                        input_ver = input_ver.replace("`", "'")
+                        pr.create_issue_comment(
+                            textwrap.dedent(f"""
+                            Hi! This is the friendly automated conda-forge-webservice.
+
+                            I did not update the version, since `{input_ver}` is not a version I can write into the recipe. Please ask again with a valid conda version.
+                            """)  # ruff: ignore[line-too-long]
+                        )
                     except RequestException:
                         version_update_error = True
 
@@ -873,12 +885,17 @@ def _sync_default_branch(
 
 
 @contextmanager
-def admin_feedstock_branch(gh, org_name, repo_name, default_branch, branch_name):
+def admin_feedstock_branch(
+    gh, org_name, repo_name, default_branch, branch_name, start_point=None
+):
     """Check out the bot's fork of a feedstock on a new branch cut from upstream.
 
     Makes the fork and syncs its default branch if needed. Yields the clone and
     the account owning it. `gh` has to be a real account rather than the app,
-    since only an account can hold a fork.
+    since only an account can hold a fork. `default_branch` has to be the
+    feedstock's real default branch, since the fork's is renamed to match it;
+    the new branch is cut from `start_point`, a commit, if given, and from
+    upstream's `default_branch` otherwise.
     """
     forked_user_gh = gh.get_user()
     forked_user = forked_user_gh.login
@@ -929,7 +946,10 @@ def admin_feedstock_branch(gh, org_name, repo_name, default_branch, branch_name)
         upstream = git_repo.create_remote("upstream", upstream_repo_url)
         upstream.fetch()
         new_branch = git_repo.create_head(
-            branch_name, getattr(upstream.refs, default_branch)
+            branch_name,
+            start_point
+            if start_point is not None
+            else getattr(upstream.refs, default_branch),
         )
         new_branch.checkout()
 
@@ -1201,7 +1221,7 @@ def remove_bot_automerge(repo):
     return True
 
 
-def make_rerender_dummy_commit(repo):
+def make_rerender_dummy_commit(repo, skip_ci=False):
     # add a dummy commit
     readme_file = os.path.join(repo.working_dir, "README.md")
     with open(readme_file, "a") as fp:
@@ -1215,8 +1235,12 @@ def make_rerender_dummy_commit(repo):
         "conda-forge-webservices[bot]",
         "121827174+conda-forge-webservices[bot]@users.noreply.github.com",
     )
+    message = "dummy commit for rerendering"
+    if skip_ci:
+        # a commit pushed after it, such as the version update, runs CI
+        message = f"[ci skip] {message}"
     repo.index.commit(
-        with_action_url("dummy commit for rerendering"),
+        with_action_url(message),
         author=author,
     )
     return True
@@ -1366,7 +1390,41 @@ def set_version_update_pr_status(repo, pr_num, status, target_url=None, sha=None
     )
 
 
-def update_version(full_name, pr_num, input_ver):
+# conda's parser decides what a version is. It strips surrounding whitespace
+# and takes a glob or a dash, so these characters are checked as well, which
+# keeps anything that could quote, template or climb a path out of the recipe
+# and its source.url, and out of a branch named after the version. fullmatch,
+# since $ would also match before a trailing newline.
+_INPUT_VERSION_CHARACTERS = re.compile(r"[A-Za-z0-9._+!]{1,64}")
+
+
+class InvalidInputVersion(ValueError):
+    """A requested version that will not be written into a recipe."""
+
+
+def valid_input_version(version):
+    """Whether a version someone asked for may go into a recipe."""
+    if not isinstance(version, str) or not _INPUT_VERSION_CHARACTERS.fullmatch(version):
+        return False
+    try:
+        VersionOrder(version)
+    except InvalidVersionSpec:
+        return False
+    return True
+
+
+def update_version(full_name, pr_num, input_ver, dispatch_ref=None):
+    """Dispatch the version updater on a pull request; returns True on failure.
+
+    A requested `input_ver` that valid_input_version refuses raises
+    InvalidInputVersion before anything is dispatched; None asks the updater
+    to find the newest version itself. The workflow is dispatched at the tag
+    of this webservices version, unless `dispatch_ref` names another ref, as
+    a live test of a branch has to.
+    """
+    if input_ver is not None and not valid_input_version(input_ver):
+        raise InvalidInputVersion(f"{input_ver!r} is not a valid version")
+
     gh = get_gh_client()
     repo = gh.get_repo(full_name)
     pull = repo.get_pull(int(pr_num))
@@ -1378,7 +1436,7 @@ def update_version(full_name, pr_num, input_ver):
         "webservices-workflow-dispatch.yml"
     )
     running = workflow.create_dispatch(
-        ref=ref,
+        ref=dispatch_ref or ref,
         inputs={
             "task": "version_update",
             "repo": repo_name,

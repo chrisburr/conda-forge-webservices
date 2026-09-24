@@ -8,6 +8,9 @@ import pytest
 from requests.exceptions import RequestException
 
 from conda_forge_webservices.commands import (
+    InvalidInputVersion,
+    update_version,
+    valid_input_version,
     pr_detailed_comment as _pr_detailed_comment,
     issue_comment as _issue_comment,
     _find_reactable_comment,
@@ -796,3 +799,95 @@ def test_pr_reply_to_invalid_command(
     assert len(comment_calls) == 1
     assert "find any valid commands" in comment_calls[0][1][arg_index]
     assert expected_url in comment_calls[0][1][arg_index]
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        "1.2.3",
+        "2026.9.10",
+        "1.2.3rc1",
+        "1.0.0.post1",
+        "1!2.0.0",
+        "v2.4.0",
+        "1.2.3+cuda",
+    ],
+)
+def test_valid_input_versions(version):
+    assert valid_input_version(version)
+
+
+@pytest.mark.parametrize(
+    "version",
+    [
+        None,
+        5,
+        "",
+        # conda's parser strips these, and takes a glob and a dash
+        " 1.2.3",
+        "1.2.3\n",
+        "1*",
+        "1.0.0-rc1",
+        # it refuses these itself
+        "1..2",
+        "1.",
+        ".1",
+        # and none of these may reach the recipe or its source.url
+        '1.2"',
+        "{{ version }}",
+        "$(whoami)",
+        "1.2.3;rm -rf /",
+        "../../etc/passwd",
+        "1`2",
+        "1" * 65,
+    ],
+)
+def test_invalid_input_versions(version):
+    assert not valid_input_version(version)
+
+
+@mock.patch("conda_forge_webservices.commands.get_gh_client")
+def test_update_version_refuses_an_invalid_version_before_dispatching(gh):
+    with pytest.raises(InvalidInputVersion):
+        update_version("conda-forge/foo-feedstock", 1, "{{ version }}")
+    gh.assert_not_called()
+
+
+@mock.patch("conda_forge_webservices.commands.get_gh_client")
+def test_update_version_lets_the_updater_find_the_version(gh):
+    """No version asked for is not an invalid one."""
+    workflow = gh.return_value.get_repo.return_value.get_workflow.return_value
+    workflow.create_dispatch.return_value = None
+    assert update_version("conda-forge/foo-feedstock", 1, None) is True
+    gh.assert_called()
+
+
+@mock.patch("conda_forge_webservices.commands.get_app_token_for_webservices_only")
+@mock.patch("conda_forge_webservices.commands.update_version")
+@mock.patch("conda_forge_webservices.commands.make_rerender_dummy_commit")
+@mock.patch("conda_forge_webservices.commands.github.Github")
+@mock.patch("conda_forge_webservices.commands.get_gh_client")
+@mock.patch("conda_forge_webservices.commands.Repo")
+def test_an_invalid_version_in_a_command_is_said_as_such(
+    git_repo,
+    gh_app,
+    gh,
+    rerender_dummy_commit,
+    update_version,
+    get_app_token_for_webservices_only,
+    set_dummy_gh_token,
+):
+    update_version.side_effect = InvalidInputVersion("nope")
+    rerender_dummy_commit.return_value = True
+    gh.return_value.get_repo.return_value.default_branch = "main"
+    pr = gh.return_value.get_repo.return_value.create_pull.return_value
+
+    issue_comment(
+        title="hi", comment="@conda-forge-admin, please update version to {{`x`}}"
+    )
+
+    comments = [call.args[0] for call in pr.create_issue_comment.call_args_list]
+    assert any("is not a version I can write" in c for c in comments), comments
+    assert not any("kicking GitHub Actions" in c for c in comments), comments
+    # the version the comment named goes in a code span it cannot close
+    assert any("`{{'x'}}`" in c for c in comments), comments
