@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING
 from github import GithubException
 from ruamel.yaml import YAML
 
+from conda_forge_webservices.utils import TRUSTED_PUBLISHING_BRANCH
+
 from .utils import run_git_command
 
 if TYPE_CHECKING:
@@ -21,6 +23,11 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 ALLOWED_USERS = ["regro-cf-autotick-bot"]
+
+# a version update pull request for a trusted publisher is opened by
+# conda-forge-admin from its fork and updated by the webservices app
+TRUSTED_PUBLISHING_PR_USER = "conda-forge-admin"
+TRUSTED_PUBLISHING_COMMITTERS = ["conda-forge-webservices[bot]"]
 
 IGNORED_CHECKS: list[str] = []
 
@@ -330,6 +337,20 @@ def _no_extra_pr_commits(pr):
     return all(e.event != "committed" for e in events[label_ind + 1 :])
 
 
+def _is_trusted_publishing_pr(pr: PullRequest) -> bool:
+    """Whether the PR is a version update opened for a trusted publisher.
+
+    This goes by the head branch, not the marker in the body, since anyone
+    who can write to the feedstock can edit the body of any PR on it.
+    """
+    return (
+        pr.user.login == TRUSTED_PUBLISHING_PR_USER
+        and pr.head.repo is not None
+        and pr.head.repo.owner.login == TRUSTED_PUBLISHING_PR_USER
+        and TRUSTED_PUBLISHING_BRANCH.fullmatch(pr.head.ref) is not None
+    )
+
+
 def _check_pr(
     pr: PullRequest, pr_for_admin: PullRequest, cfg
 ) -> tuple[bool, str | None]:
@@ -359,25 +380,34 @@ like to enable automerge again!
 """
                 )
                 return False, "commits were made after the automerge label was added"
-    else:  # The PR has no automerge label, so proceed only if titled "[bot-automerge]"
-        # only allowed users
-        if pr.user.login not in ALLOWED_USERS:
-            return (
-                False,
-                f"user {pr.user.login} cannot automerge and no automerge label found",
-            )
+    else:  # The PR has no automerge label, so proceed only if opened by a bot
+        if _is_trusted_publishing_pr(pr):
+            allowed_committers = TRUSTED_PUBLISHING_COMMITTERS
+        else:
+            # only allowed users
+            if pr.user.login not in ALLOWED_USERS:
+                return (
+                    False,
+                    f"user {pr.user.login} cannot automerge and no automerge "
+                    "label found",
+                )
 
-        # only if [bot-automerge] is in the pr title
-        if "[bot-automerge]" not in pr.title:
-            return False, "PR does not have the '[bot-automerge]' slug in the title"
+            # only if [bot-automerge] is in the pr title
+            if "[bot-automerge]" not in pr.title:
+                return (
+                    False,
+                    "PR does not have the '[bot-automerge]' slug in the title",
+                )
 
-        # only if only ALLOWED_USERS have commits
+            allowed_committers = ALLOWED_USERS
+
+        # only if only the bot has commits
         committers = set()
         for c in pr.get_commits():
             committers.add(getattr(c.author, "login", None))
             committers.add(getattr(c.committer, "login", None))
 
-        if not all(c in ALLOWED_USERS for c in committers):
+        if not all(c in allowed_committers for c in committers):
             _comment_on_pr_with_race(
                 pr_for_admin,
                 """\
@@ -464,6 +494,11 @@ def _automerge_pr(
 
     if pr.is_merged():
         return True, "PR has already been merged"
+
+    # a version update PR is a draft until its update is pushed, and GitHub
+    # will not merge a draft; marking it ready runs this again
+    if pr.draft:
+        return None, "PR is a draft"
 
     if pr.mergeable is None or not pr.mergeable:
         _comment_on_pr(

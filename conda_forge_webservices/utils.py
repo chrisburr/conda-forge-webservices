@@ -1,5 +1,7 @@
 import os
 import random
+import re
+import uuid
 import logging
 import shutil
 import time
@@ -87,6 +89,15 @@ def _test_and_raise_besides_file_not_exists(e: github.GithubException):
 # in the body of every pull request opened for a trusted publisher, so that
 # the version updater can tell one from a pull request opened for a command
 TRUSTED_PUBLISHING_MARKER = "<!-- conda-forge-trusted-publishing -->"
+
+# the head branch of a pull request opened for a trusted publisher; only
+# conda-forge-admin can create a branch in its fork, and unlike the body a
+# maintainer cannot change it, so automerge goes by it
+TRUSTED_PUBLISHING_BRANCH = re.compile(r"version-update-.+-[0-9a-f]{8}")
+
+
+def trusted_publishing_branch(version):
+    return f"version-update-{version}-{uuid.uuid4().hex[:8]}"
 
 
 def log_title_and_message_at_level(*, level, title, msg=None):

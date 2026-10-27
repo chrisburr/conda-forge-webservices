@@ -4,6 +4,10 @@ import pytest
 import requests
 
 from conda_forge_webservices import trusted_version_updates as tvu
+from conda_forge_webservices.utils import (
+    TRUSTED_PUBLISHING_BRANCH,
+    trusted_publishing_branch,
+)
 from conda_forge_webservices.trusted_publishing import (
     GITHUB_ISSUER,
     TrustedPublishingError,
@@ -693,3 +697,8 @@ def test_a_live_test_can_dispatch_at_its_branch(opening, monkeypatch):
     monkeypatch.delenv(tvu.DISPATCH_REF_ENV)
     tvu.open_version_update_pr(REQUEST)
     assert dispatched["dispatch_ref"] is None
+
+
+def test_trusted_publishing_branch_is_recognised():
+    # automerge recognises the pull request by its branch
+    assert TRUSTED_PUBLISHING_BRANCH.fullmatch(trusted_publishing_branch("1.2.3"))

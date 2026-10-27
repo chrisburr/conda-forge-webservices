@@ -20,7 +20,6 @@ import os
 import re
 import subprocess
 import threading
-import uuid
 from typing import Any
 
 import cachetools
@@ -44,7 +43,10 @@ from conda_forge_webservices.trusted_publishing import (
     parse_publishers,
     verify_token,
 )
-from conda_forge_webservices.utils import TRUSTED_PUBLISHING_MARKER
+from conda_forge_webservices.utils import (
+    TRUSTED_PUBLISHING_MARKER,
+    trusted_publishing_branch,
+)
 
 LOGGER = logging.getLogger("conda_forge_webservices.trusted_version_updates")
 
@@ -406,7 +408,7 @@ def open_version_update_pr(request: Authorized) -> dict[str, Any]:
     # as the "please update version" command does
     gh = github.Github(auth=github.Auth.Token(os.environ["GH_TOKEN"]))
     repo = gh.get_repo(f"conda-forge/{request.feedstock}")
-    branch_name = f"version-update-{request.version}-{uuid.uuid4().hex[:8]}"
+    branch_name = trusted_publishing_branch(request.version)
 
     with admin_feedstock_branch(
         gh,
