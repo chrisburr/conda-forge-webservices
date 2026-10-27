@@ -58,7 +58,7 @@ jobs:
       - name: automerge
         run: |
           git config --global user.name "conda-forge-webservices[bot]"
-          git config --global user.email "91080706+conda-forge-webservices[bot]@users.noreply.github.com"
+          git config --global user.email "121827174+conda-forge-webservices[bot]@users.noreply.github.com"
           git config --global pull.rebase false
 
           conda-forge-webservices-automerge \
